@@ -1,27 +1,27 @@
-import express from 'express';
-import crypto from 'crypto';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { Readable } from 'stream';
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Readable } from 'node:stream';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DIST_DIR = path.resolve(__dirname, '../dist');
+const WEB_BUNDLE_DIR = path.resolve(__dirname, '../web_bundle');
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
+const PORT = Number(process.env.PORT || 3001);
 
-const app = express();
-const PORT = process.env.PORT || 3001;
-
-app.use(express.json());
-
-// CORS middleware
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.ico': 'image/x-icon',
+};
 
 const INNERTUBE_CONTEXT = {
   client: {
@@ -40,7 +40,6 @@ const INNERTUBE_HEADERS = {
   Referer: 'https://music.youtube.com/',
 };
 
-// Search filter params for YouTube Music InnerTube
 const SEARCH_FILTER_PARAMS = {
   songs: 'EgWKAQIIAWoKEAkQBRAKEAMQBA==',
   videos: 'EgWKAQIQAWoKEAkQBRAKEAMQBA==',
@@ -49,7 +48,16 @@ const SEARCH_FILTER_PARAMS = {
   playlists: 'EgWKAQIoAWoKEAkQBRAKEAMQBA==',
 };
 
-// Helper: upgrade Google/YouTube thumbnail to high-res
+function sendJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-cache',
+  });
+  res.end(body);
+}
+
 function upgradeThumbnail(url, videoId = null) {
   if (!url && videoId) {
     return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
@@ -61,7 +69,6 @@ function upgradeThumbnail(url, videoId = null) {
   return url;
 }
 
-// Helper: parse duration string "3:45" or "1:02:10" into seconds
 function parseDurationSeconds(str) {
   if (!str || typeof str !== 'string') return 0;
   const parts = str.trim().split(':').map(Number);
@@ -71,13 +78,11 @@ function parseDurationSeconds(str) {
   return 0;
 }
 
-// Helper: extract runs text
 function runsText(obj) {
   if (!obj?.runs) return '';
   return obj.runs.map((r) => r.text).join('');
 }
 
-// Helper: parse a musicResponsiveListItemRenderer into a normalized item
 function parseResponsiveListItem(item, fallbackDefaults = {}) {
   if (!item) return null;
 
@@ -86,9 +91,7 @@ function parseResponsiveListItem(item, fallbackDefaults = {}) {
     item.overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId ||
     null;
 
-  const browseId =
-    item.navigationEndpoint?.browseEndpoint?.browseId ||
-    null;
+  const browseId = item.navigationEndpoint?.browseEndpoint?.browseId || null;
 
   const pageType =
     item.navigationEndpoint?.browseEndpoint?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType ||
@@ -96,7 +99,8 @@ function parseResponsiveListItem(item, fallbackDefaults = {}) {
 
   const thumbs =
     item.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
-  const rawThumb = thumbs[thumbs.length - 1]?.url || fallbackDefaults.thumbnail || '';
+  const rawThumb =
+    thumbs[thumbs.length - 1]?.url || fallbackDefaults.thumbnail || '';
   const thumbnail = upgradeThumbnail(rawThumb, videoId);
 
   const flexCols = (item.flexColumns || []).map((fc) => {
@@ -116,7 +120,6 @@ function parseResponsiveListItem(item, fallbackDefaults = {}) {
   const secondaryText = flexCols[1]?.text || '';
   const tertiaryText = flexCols[2]?.text || '';
 
-  // Split secondaryRuns by " • " separator
   const segments = [];
   let currentSeg = [];
   for (const r of secondaryRuns) {
@@ -130,9 +133,12 @@ function parseResponsiveListItem(item, fallbackDefaults = {}) {
   if (currentSeg.length) segments.push(currentSeg);
 
   let itemType = fallbackDefaults.type || 'song';
-  if (pageType.includes('ALBUM') || browseId?.startsWith('MPREb_')) itemType = 'album';
-  else if (pageType.includes('ARTIST') || browseId?.startsWith('UC')) itemType = 'artist';
-  else if (pageType.includes('PLAYLIST') || browseId?.startsWith('VL')) itemType = 'playlist';
+  if (pageType.includes('ALBUM') || browseId?.startsWith('MPREb_'))
+    itemType = 'album';
+  else if (pageType.includes('ARTIST') || browseId?.startsWith('UC'))
+    itemType = 'artist';
+  else if (pageType.includes('PLAYLIST') || browseId?.startsWith('VL'))
+    itemType = 'playlist';
   else if (videoId) itemType = 'song';
 
   let artist = fallbackDefaults.artist || '';
@@ -140,13 +146,23 @@ function parseResponsiveListItem(item, fallbackDefaults = {}) {
   let duration = fixedCols[0] || '';
   let plays = '';
 
-  const typeLabels = ['Song', 'Video', 'Album', 'Single', 'EP', 'Artist', 'Playlist', 'Podcast'];
+  const typeLabels = [
+    'Song',
+    'Video',
+    'Album',
+    'Single',
+    'EP',
+    'Artist',
+    'Playlist',
+    'Podcast',
+  ];
   const segTexts = segments.map((s) => s.map((r) => r.text).join('').trim());
 
   if (segTexts.length > 0 && typeLabels.includes(segTexts[0])) {
     const label = segTexts[0].toLowerCase();
     if (label === 'video') itemType = 'video';
-    else if (label === 'album' || label === 'single' || label === 'ep') itemType = 'album';
+    else if (label === 'album' || label === 'single' || label === 'ep')
+      itemType = 'album';
     else if (label === 'artist') itemType = 'artist';
     else if (label === 'playlist') itemType = 'playlist';
     segTexts.shift();
@@ -170,7 +186,8 @@ function parseResponsiveListItem(item, fallbackDefaults = {}) {
     album = tertiaryText;
   }
 
-  if (!artist) artist = secondaryText || fallbackDefaults.artist || 'YouTube Music';
+  if (!artist)
+    artist = secondaryText || fallbackDefaults.artist || 'YouTube Music';
 
   const explicit = Boolean(
     item.badges?.some((b) =>
@@ -194,7 +211,6 @@ function parseResponsiveListItem(item, fallbackDefaults = {}) {
   };
 }
 
-// Helper: parse musicTwoRowItemRenderer (cards in carousels for albums, playlists, videos)
 function parseTwoRowItem(item) {
   if (!item) return null;
   const title = runsText(item.title);
@@ -208,14 +224,17 @@ function parseTwoRowItem(item) {
     item.navigationEndpoint?.browseEndpoint?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType ||
     '';
 
-  const thumbs = item.thumbnailRenderer?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
+  const thumbs =
+    item.thumbnailRenderer?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
   const rawThumb = thumbs[thumbs.length - 1]?.url || '';
   const thumbnail = upgradeThumbnail(rawThumb, videoId);
 
   let type = 'playlist';
   if (videoId) type = 'video';
-  else if (pageType.includes('ALBUM') || browseId?.startsWith('MPREb_')) type = 'album';
-  else if (pageType.includes('ARTIST') || browseId?.startsWith('UC')) type = 'artist';
+  else if (pageType.includes('ALBUM') || browseId?.startsWith('MPREb_'))
+    type = 'album';
+  else if (pageType.includes('ARTIST') || browseId?.startsWith('UC'))
+    type = 'artist';
 
   const parts = subtitle.split('•').map((s) => s.trim());
   const artist = parts[parts.length - 1] || subtitle || 'YouTube Music';
@@ -234,7 +253,6 @@ function parseTwoRowItem(item) {
   };
 }
 
-// Curated showcase tracks with verified SponsorBlock segments, RYD stats & LRCLIB synced lyrics
 const SHOWCASE_TRACKS = [
   {
     id: '4NRXx6U8ABQ',
@@ -350,423 +368,6 @@ const SHOWCASE_TRACKS = [
   },
 ];
 
-// 1. Health Endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    services: {
-      innertube: 'WEB_REMIX v1.20240724.01.00',
-      sponsorBlock: 'https://sponsor.ajay.app/api/skipSegments',
-      returnYouTubeDislike: 'https://returnyoutubedislikeapi.com/votes',
-      lrclib: 'https://lrclib.net/api/search',
-    },
-  });
-});
-
-// 2. Home Feed Endpoint (InnerTube FEmusic_home + FEmusic_charts + Showcase)
-app.get('/api/home', async (req, res) => {
-  try {
-    const [homeRes, chartsRes] = await Promise.allSettled([
-      fetch('https://music.youtube.com/youtubei/v1/browse?prettyPrint=false', {
-        method: 'POST',
-        headers: INNERTUBE_HEADERS,
-        body: JSON.stringify({ context: INNERTUBE_CONTEXT, browseId: 'FEmusic_home' }),
-      }).then((r) => r.json()),
-      fetch('https://music.youtube.com/youtubei/v1/browse?prettyPrint=false', {
-        method: 'POST',
-        headers: INNERTUBE_HEADERS,
-        body: JSON.stringify({
-          context: INNERTUBE_CONTEXT,
-          browseId: 'FEmusic_charts',
-          formData: { selectedValues: ['US'] },
-        }),
-      }).then((r) => r.json()),
-    ]);
-
-    const shelves = [
-      {
-        id: 'simpmusic-showcase',
-        title: 'SponsorBlock & Synced Lyrics Featured',
-        subtitle: 'Instant auto-skip segments, ReturnYouTubeDislike stats & LRCLIB karaoke lyrics',
-        type: 'showcase',
-        items: SHOWCASE_TRACKS,
-      },
-    ];
-
-    const parseBrowseShelves = (data, prefix) => {
-      const rawShelves =
-        data?.contents?.singleColumnBrowseResultsRenderer?.tabs?.[0]?.tabRenderer?.content
-          ?.sectionListRenderer?.contents || [];
-      for (const s of rawShelves) {
-        const carousel = s.musicCarouselShelfRenderer;
-        if (!carousel) continue;
-        const header = carousel.header?.musicCarouselShelfBasicHeaderRenderer;
-        const title = runsText(header?.title) || 'Trending Now';
-        const subtitle = runsText(header?.strapline) || '';
-        const items = [];
-        for (const c of carousel.contents || []) {
-          if (c.musicResponsiveListItemRenderer) {
-            const parsed = parseResponsiveListItem(c.musicResponsiveListItemRenderer);
-            if (parsed && (parsed.videoId || parsed.browseId)) items.push(parsed);
-          } else if (c.musicTwoRowItemRenderer) {
-            const parsed = parseTwoRowItem(c.musicTwoRowItemRenderer);
-            if (parsed && (parsed.videoId || parsed.browseId)) items.push(parsed);
-          }
-        }
-        if (items.length > 0) {
-          shelves.push({
-            id: `${prefix}-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
-            title,
-            subtitle,
-            type: items[0].videoId && items[0].type === 'song' ? 'songs' : 'cards',
-            items,
-          });
-        }
-      }
-    };
-
-    if (homeRes.status === 'fulfilled') {
-      parseBrowseShelves(homeRes.value, 'home');
-    }
-    if (chartsRes.status === 'fulfilled') {
-      parseBrowseShelves(chartsRes.value, 'charts');
-    }
-
-    // Ensure we always have a rich "Quick Picks (InnerTube Songs)" shelf if FEmusic_home didn't return one
-    const hasSongShelf = shelves.some((s) => s.type === 'songs');
-    if (!hasSongShelf) {
-      try {
-        const qpRes = await fetch(
-          'https://music.youtube.com/youtubei/v1/search?prettyPrint=false',
-          {
-            method: 'POST',
-            headers: INNERTUBE_HEADERS,
-            body: JSON.stringify({
-              context: INNERTUBE_CONTEXT,
-              query: 'top hits 2025 2026',
-              params: SEARCH_FILTER_PARAMS.songs,
-            }),
-          }
-        ).then((r) => r.json());
-        const qpContents =
-          qpRes?.contents?.tabbedSearchResultsRenderer?.tabs?.[0]?.tabRenderer
-            ?.content?.sectionListRenderer?.contents?.[0]?.musicShelfRenderer
-            ?.contents || [];
-        const qpItems = [];
-        for (const c of qpContents) {
-          if (c.musicResponsiveListItemRenderer) {
-            const parsed = parseResponsiveListItem(
-              c.musicResponsiveListItemRenderer,
-              { type: 'song' }
-            );
-            if (parsed && parsed.videoId) qpItems.push(parsed);
-          }
-        }
-        if (qpItems.length > 0) {
-          shelves.splice(1, 0, {
-            id: 'innertube-quick-picks',
-            title: 'Quick Picks',
-            subtitle: 'Live from YouTube Music InnerTube (WEB_REMIX)',
-            type: 'songs',
-            items: qpItems.slice(0, 16),
-          });
-        }
-      } catch {}
-    }
-
-    res.json({ shelves });
-  } catch (err) {
-    console.error('Error in /api/home:', err);
-    res.json({
-      shelves: [
-        {
-          id: 'simpmusic-showcase',
-          title: 'SponsorBlock & Synced Lyrics Featured',
-          subtitle: 'Instant auto-skip segments, ReturnYouTubeDislike stats & LRCLIB karaoke lyrics',
-          type: 'showcase',
-          items: SHOWCASE_TRACKS,
-        },
-      ],
-    });
-  }
-});
-
-// 3. Search Suggestions (InnerTube Autocomplete)
-app.get('/api/suggestions', async (req, res) => {
-  const q = String(req.query.q || '').trim();
-  if (!q) return res.json({ queries: [], items: [] });
-
-  try {
-    const ytRes = await fetch(
-      'https://music.youtube.com/youtubei/v1/music/get_search_suggestions?prettyPrint=false',
-      {
-        method: 'POST',
-        headers: INNERTUBE_HEADERS,
-        body: JSON.stringify({ context: INNERTUBE_CONTEXT, input: q }),
-      }
-    );
-    const data = await ytRes.json();
-    const queries = [];
-    const items = [];
-
-    for (const sec of data.contents || []) {
-      const list = sec.searchSuggestionsSectionRenderer?.contents || [];
-      for (const entry of list) {
-        if (entry.searchSuggestionRenderer) {
-          const text = runsText(entry.searchSuggestionRenderer.suggestion);
-          if (text) queries.push(text);
-        } else if (entry.musicResponsiveListItemRenderer) {
-          const parsed = parseResponsiveListItem(entry.musicResponsiveListItemRenderer);
-          if (parsed) items.push(parsed);
-        }
-      }
-    }
-
-    res.json({ queries: queries.slice(0, 7), items: items.slice(0, 4) });
-  } catch (err) {
-    res.json({ queries: [], items: [] });
-  }
-});
-
-// 4. InnerTube Search Endpoint
-app.get('/api/search', async (req, res) => {
-  const q = String(req.query.q || '').trim();
-  const filter = String(req.query.filter || 'songs').toLowerCase();
-  if (!q) return res.json({ results: [], topResult: null });
-
-  try {
-    const params = SEARCH_FILTER_PARAMS[filter] || undefined;
-    const body = {
-      context: INNERTUBE_CONTEXT,
-      query: q,
-      ...(params ? { params } : {}),
-    };
-
-    const ytRes = await fetch(
-      'https://music.youtube.com/youtubei/v1/search?prettyPrint=false',
-      {
-        method: 'POST',
-        headers: INNERTUBE_HEADERS,
-        body: JSON.stringify(body),
-      }
-    );
-    const data = await ytRes.json();
-
-    const rawSections =
-      data?.contents?.tabbedSearchResultsRenderer?.tabs?.[0]?.tabRenderer?.content
-        ?.sectionListRenderer?.contents || [];
-
-    const results = [];
-    let topResult = null;
-
-    for (const section of rawSections) {
-      const innerContents = section.itemSectionRenderer?.contents || [section];
-      for (const s of innerContents) {
-        if (s.musicCardShelfRenderer) {
-          const card = s.musicCardShelfRenderer;
-          const title = runsText(card.title);
-          const subtitle = runsText(card.subtitle);
-          const videoId =
-            card.title?.runs?.[0]?.navigationEndpoint?.watchEndpoint?.videoId ||
-            card.thumbnailOverlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId ||
-            null;
-          const browseId =
-            card.title?.runs?.[0]?.navigationEndpoint?.browseEndpoint?.browseId || null;
-          const thumbs =
-            card.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
-          const thumbnail = upgradeThumbnail(thumbs[thumbs.length - 1]?.url, videoId);
-          if (title && (videoId || browseId)) {
-            topResult = {
-              id: videoId || browseId,
-              videoId,
-              browseId,
-              type: videoId ? 'song' : browseId?.startsWith('UC') ? 'artist' : 'album',
-              title,
-              artist: subtitle,
-              subtitle,
-              thumbnail,
-              duration: '3:50',
-              durationSeconds: 230,
-            };
-          }
-        }
-        if (s.musicResponsiveListItemRenderer) {
-          const parsed = parseResponsiveListItem(s.musicResponsiveListItemRenderer, {
-            type: filter === 'all' ? undefined : filter.replace(/s$/, ''),
-          });
-          if (parsed && (parsed.videoId || parsed.browseId)) results.push(parsed);
-        }
-        if (s.musicShelfRenderer) {
-          for (const c of s.musicShelfRenderer.contents || []) {
-            if (c.musicResponsiveListItemRenderer) {
-              const parsed = parseResponsiveListItem(c.musicResponsiveListItemRenderer, {
-                type: filter === 'all' ? undefined : filter.replace(/s$/, ''),
-              });
-              if (parsed && (parsed.videoId || parsed.browseId)) results.push(parsed);
-            }
-          }
-        }
-      }
-    }
-
-    res.json({ query: q, filter, topResult, results });
-  } catch (err) {
-    console.error('Error in /api/search:', err);
-    res.status(500).json({ error: 'InnerTube search failed', results: [] });
-  }
-});
-
-// 5. InnerTube Browse Endpoint (Albums, Playlists, Artists)
-app.get('/api/browse/:browseId', async (req, res) => {
-  const { browseId } = req.params;
-  if (!browseId) return res.status(400).json({ error: 'Missing browseId' });
-
-  try {
-    const ytRes = await fetch(
-      'https://music.youtube.com/youtubei/v1/browse?prettyPrint=false',
-      {
-        method: 'POST',
-        headers: INNERTUBE_HEADERS,
-        body: JSON.stringify({ context: INNERTUBE_CONTEXT, browseId }),
-      }
-    );
-    const data = await ytRes.json();
-
-    // Case A: TwoColumnBrowseResultsRenderer (Albums & Playlists)
-    if (data.contents?.twoColumnBrowseResultsRenderer) {
-      const twoCol = data.contents.twoColumnBrowseResultsRenderer;
-      const header =
-        twoCol.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]
-          ?.musicResponsiveHeaderRenderer ||
-        twoCol.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]
-          ?.musicEditablePlaylistDetailHeaderRenderer?.header?.musicResponsiveHeaderRenderer;
-
-      const title = runsText(header?.title) || 'Collection';
-      const subtitle = runsText(header?.subtitle) || '';
-      const artist = runsText(header?.straplineTextOne) || 'YouTube Music';
-      const description =
-        runsText(
-          header?.description?.musicDescriptionShelfRenderer?.description
-        ) || '';
-      const secondSubtitle = runsText(header?.secondSubtitle) || '';
-      const thumbs =
-        header?.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
-      const thumbnail = upgradeThumbnail(thumbs[thumbs.length - 1]?.url);
-
-      const secContents =
-        twoCol.secondaryContents?.sectionListRenderer?.contents || [];
-      const tracks = [];
-      for (const sc of secContents) {
-        const shelf = sc.musicPlaylistShelfRenderer || sc.musicShelfRenderer;
-        if (!shelf) continue;
-        for (const c of shelf.contents || []) {
-          if (c.musicResponsiveListItemRenderer) {
-            const parsed = parseResponsiveListItem(
-              c.musicResponsiveListItemRenderer,
-              {
-                artist,
-                album: title,
-                thumbnail,
-                type: 'song',
-              }
-            );
-            if (parsed && parsed.videoId) tracks.push(parsed);
-          }
-        }
-      }
-
-      return res.json({
-        browseId,
-        kind: browseId.startsWith('MPREb_') ? 'album' : 'playlist',
-        title,
-        artist,
-        subtitle,
-        secondSubtitle,
-        description,
-        thumbnail,
-        tracks,
-        shelves: [],
-      });
-    }
-
-    // Case B: Artist or SingleColumn Browse
-    const header =
-      data.header?.musicImmersiveHeaderRenderer ||
-      data.header?.musicVisualHeaderRenderer ||
-      data.header?.musicDetailHeaderRenderer;
-
-    const title = runsText(header?.title) || 'Artist';
-    const description = runsText(header?.description) || '';
-    const subscribers =
-      runsText(
-        header?.subscriptionButton?.subscribeButtonRenderer?.subscriberCountText
-      ) || '';
-    const thumbs =
-      header?.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
-    const thumbnail = upgradeThumbnail(thumbs[thumbs.length - 1]?.url);
-
-    const rawShelves =
-      data.contents?.singleColumnBrowseResultsRenderer?.tabs?.[0]?.tabRenderer
-        ?.content?.sectionListRenderer?.contents || [];
-
-    const tracks = [];
-    const shelves = [];
-
-    for (const s of rawShelves) {
-      if (s.musicShelfRenderer) {
-        const shelfTitle = runsText(s.musicShelfRenderer.title) || 'Top Songs';
-        for (const c of s.musicShelfRenderer.contents || []) {
-          if (c.musicResponsiveListItemRenderer) {
-            const parsed = parseResponsiveListItem(
-              c.musicResponsiveListItemRenderer,
-              { artist: title, thumbnail }
-            );
-            if (parsed && parsed.videoId) tracks.push(parsed);
-          }
-        }
-      } else if (s.musicCarouselShelfRenderer) {
-        const carousel = s.musicCarouselShelfRenderer;
-        const shelfTitle =
-          runsText(
-            carousel.header?.musicCarouselShelfBasicHeaderRenderer?.title
-          ) || 'Featured';
-        const items = [];
-        for (const c of carousel.contents || []) {
-          if (c.musicTwoRowItemRenderer) {
-            const parsed = parseTwoRowItem(c.musicTwoRowItemRenderer);
-            if (parsed) items.push(parsed);
-          } else if (c.musicResponsiveListItemRenderer) {
-            const parsed = parseResponsiveListItem(
-              c.musicResponsiveListItemRenderer,
-              { artist: title }
-            );
-            if (parsed) items.push(parsed);
-          }
-        }
-        if (items.length > 0) {
-          shelves.push({ id: shelfTitle, title: shelfTitle, items });
-        }
-      }
-    }
-
-    res.json({
-      browseId,
-      kind: 'artist',
-      title,
-      artist: title,
-      subtitle: subscribers ? `${subscribers} subscribers` : 'Artist',
-      description,
-      thumbnail,
-      tracks,
-      shelves,
-    });
-  } catch (err) {
-    console.error('Error in /api/browse:', err);
-    res.status(500).json({ error: 'Browse failed' });
-  }
-});
-
-// Helper: Fetch SponsorBlock segments for a videoId
 async function fetchSponsorBlock(videoId) {
   if (!videoId) return [];
   const categories = JSON.stringify([
@@ -800,7 +401,6 @@ async function fetchSponsorBlock(videoId) {
   }
 }
 
-// Helper: Fetch ReturnYouTubeDislike stats for a videoId
 async function fetchRYD(videoId) {
   if (!videoId) return null;
   try {
@@ -814,7 +414,9 @@ async function fetchRYD(videoId) {
     const d = await res.json();
     const totalVotes = (d.likes || 0) + (d.dislikes || 0);
     const likePercentage =
-      totalVotes > 0 ? Math.round(((d.likes || 0) / totalVotes) * 1000) / 10 : 100;
+      totalVotes > 0
+        ? Math.round(((d.likes || 0) / totalVotes) * 1000) / 10
+        : 100;
     return {
       id: d.id,
       likes: d.likes || 0,
@@ -831,7 +433,6 @@ async function fetchRYD(videoId) {
   }
 }
 
-// Helper: Parse LRC synced lyrics string "[00:12.34] Hello world" into array
 function parseLrcString(lrc) {
   if (!lrc || typeof lrc !== 'string') return [];
   const lines = lrc.split('\n');
@@ -858,7 +459,6 @@ function parseLrcString(lrc) {
   return parsed.sort((a, b) => a.time - b.time);
 }
 
-// Helper: Fetch LRCLIB synced & plain lyrics
 async function fetchLyrics(title, artist, lyricsBrowseId = null) {
   const cleanTitle = String(title || '')
     .replace(/\(Official.*?\)|\[Official.*?\]|\(Video\)|\(Audio\)|\(Lyrics\)/gi, '')
@@ -868,7 +468,6 @@ async function fetchLyrics(title, artist, lyricsBrowseId = null) {
     .trim();
 
   try {
-    // 1. Try LRCLIB exact search
     const qUrl = `https://lrclib.net/api/search?track_name=${encodeURIComponent(
       cleanTitle
     )}&artist_name=${encodeURIComponent(cleanArtist)}`;
@@ -878,7 +477,6 @@ async function fetchLyrics(title, artist, lyricsBrowseId = null) {
     });
     let list = res.ok ? await res.json() : [];
 
-    // 2. Fallback to general query search on LRCLIB
     if (!Array.isArray(list) || list.length === 0) {
       const fallbackUrl = `https://lrclib.net/api/search?q=${encodeURIComponent(
         `${cleanTitle} ${cleanArtist}`
@@ -898,7 +496,6 @@ async function fetchLyrics(title, artist, lyricsBrowseId = null) {
         trackName: withSynced.trackName,
         artistName: withSynced.artistName,
         albumName: withSynced.albumName,
-        Instrumental: Boolean(withSynced.instrumental),
         hasSynced: syncedLines.length > 0,
         syncedLines,
         plainLyrics:
@@ -907,11 +504,8 @@ async function fetchLyrics(title, artist, lyricsBrowseId = null) {
           '',
       };
     }
-  } catch (e) {
-    // Continue to InnerTube fallback
-  }
+  } catch {}
 
-  // 3. Fallback to InnerTube Lyrics browseId
   if (lyricsBrowseId) {
     try {
       const lRes = await fetch(
@@ -942,15 +536,9 @@ async function fetchLyrics(title, artist, lyricsBrowseId = null) {
     } catch {}
   }
 
-  return {
-    source: 'None',
-    hasSynced: false,
-    syncedLines: [],
-    plainLyrics: '',
-  };
+  return { source: 'None', hasSynced: false, syncedLines: [], plainLyrics: '' };
 }
 
-// Helper: Resolve direct studio audio stream (iTunes 256kbps AAC / Deezer MP3 / JioSaavn 320kbps AAC)
 async function resolveDirectAudioStream(title, artist) {
   const cleanTitle = String(title || '')
     .replace(/\(Official.*?\)|\[Official.*?\]|\(Video\)|\(Audio\)|\(Lyrics\)/gi, '')
@@ -960,7 +548,6 @@ async function resolveDirectAudioStream(title, artist) {
     .trim();
   const searchTerm = `${cleanTitle} ${cleanArtist}`.trim();
 
-  // 1. Try iTunes Search API (256kbps AAC Plus studio audio)
   try {
     const itunesRes = await fetch(
       `https://itunes.apple.com/search?term=${encodeURIComponent(
@@ -971,10 +558,11 @@ async function resolveDirectAudioStream(title, artist) {
     if (itunesRes.ok) {
       const itunesData = await itunesRes.json();
       const results = itunesData.results || [];
-      // Pick best match where artistName or trackName matches closely
       const match =
         results.find((r) =>
-          r.artistName?.toLowerCase().includes(cleanArtist.toLowerCase().split(',')[0].trim())
+          r.artistName
+            ?.toLowerCase()
+            .includes(cleanArtist.toLowerCase().split(',')[0].trim())
         ) || results[0];
       if (match?.previewUrl) {
         return {
@@ -988,7 +576,6 @@ async function resolveDirectAudioStream(title, artist) {
     }
   } catch {}
 
-  // 2. Fallback to Deezer CDN MP3
   try {
     const dzRes = await fetch(
       `https://api.deezer.com/search?q=${encodeURIComponent(searchTerm)}&limit=3`,
@@ -1012,7 +599,6 @@ async function resolveDirectAudioStream(title, artist) {
   return null;
 }
 
-// Helper: Find counterpart Music Video ID via InnerTube Video Search if primary ID has no SponsorBlock segments
 async function findCounterpartMusicVideoId(title, artist) {
   if (!title) return null;
   try {
@@ -1039,218 +625,524 @@ async function findCounterpartMusicVideoId(title, artist) {
   }
 }
 
-// 6. Comprehensive Track Context Endpoint:
-// Returns InnerTube Radio Queue, SponsorBlock Segments, ReturnYouTubeDislike Stats, LRCLIB Synced Lyrics & Direct Audio Stream
-app.get('/api/track-context/:videoId', async (req, res) => {
-  const { videoId } = req.params;
-  const queryTitle = String(req.query.title || '');
-  const queryArtist = String(req.query.artist || '');
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    return res.end();
+  }
+
+  const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const pathname = parsedUrl.pathname;
 
   try {
-    // 1. Fetch InnerTube /next (Radio Automix Queue + Lyrics browseId), SponsorBlock, and RYD in parallel
-    const [nextResult, primarySB, primaryRYD] = await Promise.all([
-      fetch('https://music.youtube.com/youtubei/v1/next?prettyPrint=false', {
-        method: 'POST',
-        headers: INNERTUBE_HEADERS,
-        body: JSON.stringify({
-          context: INNERTUBE_CONTEXT,
-          videoId,
-          playlistId: `RDAMVM${videoId}`,
-          isAudioOnly: true,
-        }),
-      })
-        .then((r) => r.json())
-        .catch(() => null),
-      fetchSponsorBlock(videoId),
-      fetchRYD(videoId),
-    ]);
-
-    // Parse queue & current track metadata from /next
-    const tabs =
-      nextResult?.contents?.singleColumnMusicWatchNextResultsRenderer
-        ?.tabbedRenderer?.watchNextTabbedResultsRenderer?.tabs || [];
-    const queueItemsRaw =
-      tabs[0]?.tabRenderer?.content?.musicQueueRenderer?.content
-        ?.playlistPanelRenderer?.contents || [];
-    const lyricsBrowseId =
-      tabs[1]?.tabRenderer?.endpoint?.browseEndpoint?.browseId || null;
-
-    const upNextQueue = [];
-    for (const q of queueItemsRaw) {
-      const pv = q.playlistPanelVideoRenderer;
-      if (!pv || !pv.videoId) continue;
-      const tTitle = runsText(pv.title);
-      const byline = runsText(pv.longBylineText) || runsText(pv.shortBylineText);
-      const bylineParts = byline.split('•').map((s) => s.trim());
-      const tArtist = bylineParts[0] || 'YouTube Music';
-      const tAlbum = bylineParts[1] || '';
-      const durText = runsText(pv.lengthText) || '3:30';
-      const thumbs = pv.thumbnail?.thumbnails || [];
-      const thumbUrl = upgradeThumbnail(
-        thumbs[thumbs.length - 1]?.url,
-        pv.videoId
-      );
-      upNextQueue.push({
-        id: pv.videoId,
-        videoId: pv.videoId,
-        type: 'song',
-        title: tTitle,
-        artist: tArtist,
-        album: tAlbum,
-        duration: durText,
-        durationSeconds: parseDurationSeconds(durText) || 210,
-        thumbnail: thumbUrl,
+    // 1. /api/health
+    if (pathname === '/api/health') {
+      return sendJson(res, 200, {
+        status: 'ok',
+        services: {
+          innertube: 'WEB_REMIX v1.20240724.01.00',
+          sponsorBlock: 'https://sponsor.ajay.app/api/skipSegments',
+          returnYouTubeDislike: 'https://returnyoutubedislikeapi.com/votes',
+          lrclib: 'https://lrclib.net/api/search',
+        },
       });
     }
 
-    const effectiveTitle =
-      queryTitle || upNextQueue[0]?.title || 'Unknown Track';
-    const effectiveArtist =
-      queryArtist || upNextQueue[0]?.artist || 'Unknown Artist';
+    // 2. /api/home
+    if (pathname === '/api/home') {
+      const [homeRes, chartsRes] = await Promise.allSettled([
+        fetch('https://music.youtube.com/youtubei/v1/browse?prettyPrint=false', {
+          method: 'POST',
+          headers: INNERTUBE_HEADERS,
+          body: JSON.stringify({ context: INNERTUBE_CONTEXT, browseId: 'FEmusic_home' }),
+        }).then((r) => r.json()),
+        fetch('https://music.youtube.com/youtubei/v1/browse?prettyPrint=false', {
+          method: 'POST',
+          headers: INNERTUBE_HEADERS,
+          body: JSON.stringify({
+            context: INNERTUBE_CONTEXT,
+            browseId: 'FEmusic_charts',
+            formData: { selectedValues: ['US'] },
+          }),
+        }).then((r) => r.json()),
+      ]);
 
-    // 2. If primary videoId had no SponsorBlock segments, check counterpart Official Music Video ID!
-    let sponsorBlockSegments = primarySB;
-    let sponsorBlockVideoId = videoId;
-    let rydStats = primaryRYD;
-    let musicVideoId = videoId;
+      const shelves = [
+        {
+          id: 'simpmusic-showcase',
+          title: 'SponsorBlock & Synced Lyrics Featured',
+          subtitle: 'Instant auto-skip segments, ReturnYouTubeDislike stats & LRCLIB karaoke lyrics',
+          type: 'showcase',
+          items: SHOWCASE_TRACKS,
+        },
+      ];
 
-    if (sponsorBlockSegments.length === 0 && effectiveTitle) {
-      const altVid = await findCounterpartMusicVideoId(
-        effectiveTitle,
-        effectiveArtist
+      const parseBrowseShelves = (data, prefix) => {
+        const rawShelves =
+          data?.contents?.singleColumnBrowseResultsRenderer?.tabs?.[0]?.tabRenderer?.content
+            ?.sectionListRenderer?.contents || [];
+        for (const s of rawShelves) {
+          const carousel = s.musicCarouselShelfRenderer;
+          if (!carousel) continue;
+          const header = carousel.header?.musicCarouselShelfBasicHeaderRenderer;
+          const title = runsText(header?.title) || 'Trending Now';
+          const subtitle = runsText(header?.strapline) || '';
+          const items = [];
+          for (const c of carousel.contents || []) {
+            if (c.musicResponsiveListItemRenderer) {
+              const parsed = parseResponsiveListItem(c.musicResponsiveListItemRenderer);
+              if (parsed && (parsed.videoId || parsed.browseId)) items.push(parsed);
+            } else if (c.musicTwoRowItemRenderer) {
+              const parsed = parseTwoRowItem(c.musicTwoRowItemRenderer);
+              if (parsed && (parsed.videoId || parsed.browseId)) items.push(parsed);
+            }
+          }
+          if (items.length > 0) {
+            shelves.push({
+              id: `${prefix}-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+              title,
+              subtitle,
+              type: items[0].videoId && items[0].type === 'song' ? 'songs' : 'cards',
+              items,
+            });
+          }
+        }
+      };
+
+      if (homeRes.status === 'fulfilled') parseBrowseShelves(homeRes.value, 'home');
+      if (chartsRes.status === 'fulfilled') parseBrowseShelves(chartsRes.value, 'charts');
+
+      const hasSongShelf = shelves.some((s) => s.type === 'songs');
+      if (!hasSongShelf) {
+        try {
+          const qpRes = await fetch(
+            'https://music.youtube.com/youtubei/v1/search?prettyPrint=false',
+            {
+              method: 'POST',
+              headers: INNERTUBE_HEADERS,
+              body: JSON.stringify({
+                context: INNERTUBE_CONTEXT,
+                query: 'top hits 2025 2026',
+                params: SEARCH_FILTER_PARAMS.songs,
+              }),
+            }
+          ).then((r) => r.json());
+          const qpContents =
+            qpRes?.contents?.tabbedSearchResultsRenderer?.tabs?.[0]?.tabRenderer
+              ?.content?.sectionListRenderer?.contents?.[0]?.musicShelfRenderer
+              ?.contents || [];
+          const qpItems = [];
+          for (const c of qpContents) {
+            if (c.musicResponsiveListItemRenderer) {
+              const parsed = parseResponsiveListItem(
+                c.musicResponsiveListItemRenderer,
+                { type: 'song' }
+              );
+              if (parsed && parsed.videoId) qpItems.push(parsed);
+            }
+          }
+          if (qpItems.length > 0) {
+            shelves.splice(1, 0, {
+              id: 'innertube-quick-picks',
+              title: 'Quick Picks',
+              subtitle: 'Live from YouTube Music InnerTube (WEB_REMIX)',
+              type: 'songs',
+              items: qpItems.slice(0, 16),
+            });
+          }
+        } catch {}
+      }
+
+      return sendJson(res, 200, { shelves });
+    }
+
+    // 3. /api/suggestions
+    if (pathname === '/api/suggestions') {
+      const q = String(parsedUrl.searchParams.get('q') || '').trim();
+      if (!q) return sendJson(res, 200, { queries: [], items: [] });
+
+      const ytRes = await fetch(
+        'https://music.youtube.com/youtubei/v1/music/get_search_suggestions?prettyPrint=false',
+        {
+          method: 'POST',
+          headers: INNERTUBE_HEADERS,
+          body: JSON.stringify({ context: INNERTUBE_CONTEXT, input: q }),
+        }
       );
-      if (altVid && altVid !== videoId) {
-        musicVideoId = altVid;
-        const [altSB, altRYD] = await Promise.all([
-          fetchSponsorBlock(altVid),
-          fetchRYD(altVid),
-        ]);
-        if (altSB.length > 0) {
-          sponsorBlockSegments = altSB;
-          sponsorBlockVideoId = altVid;
+      const data = await ytRes.json();
+      const queries = [];
+      for (const sec of data.contents || []) {
+        const list = sec.searchSuggestionsSectionRenderer?.contents || [];
+        for (const entry of list) {
+          if (entry.searchSuggestionRenderer) {
+            const text = runsText(entry.searchSuggestionRenderer.suggestion);
+            if (text) queries.push(text);
+          }
         }
-        if (
-          altRYD &&
-          (!rydStats || (altRYD.viewCount || 0) > (rydStats.viewCount || 0))
-        ) {
-          rydStats = altRYD;
+      }
+      return sendJson(res, 200, { queries: queries.slice(0, 7) });
+    }
+
+    // 4. /api/search
+    if (pathname === '/api/search') {
+      const q = String(parsedUrl.searchParams.get('q') || '').trim();
+      const filter = String(parsedUrl.searchParams.get('filter') || 'songs').toLowerCase();
+      if (!q) return sendJson(res, 200, { results: [], topResult: null });
+
+      const params = SEARCH_FILTER_PARAMS[filter] || undefined;
+      const ytRes = await fetch(
+        'https://music.youtube.com/youtubei/v1/search?prettyPrint=false',
+        {
+          method: 'POST',
+          headers: INNERTUBE_HEADERS,
+          body: JSON.stringify({
+            context: INNERTUBE_CONTEXT,
+            query: q,
+            ...(params ? { params } : {}),
+          }),
         }
+      );
+      const data = await ytRes.json();
+      const rawSections =
+        data?.contents?.tabbedSearchResultsRenderer?.tabs?.[0]?.tabRenderer?.content
+          ?.sectionListRenderer?.contents || [];
+      const results = [];
+      for (const section of rawSections) {
+        const innerContents = section.itemSectionRenderer?.contents || [section];
+        for (const s of innerContents) {
+          if (s.musicResponsiveListItemRenderer) {
+            const parsed = parseResponsiveListItem(s.musicResponsiveListItemRenderer, {
+              type: filter === 'all' ? undefined : filter.replace(/s$/, ''),
+            });
+            if (parsed && (parsed.videoId || parsed.browseId)) results.push(parsed);
+          }
+          if (s.musicShelfRenderer) {
+            for (const c of s.musicShelfRenderer.contents || []) {
+              if (c.musicResponsiveListItemRenderer) {
+                const parsed = parseResponsiveListItem(
+                  c.musicResponsiveListItemRenderer,
+                  { type: filter === 'all' ? undefined : filter.replace(/s$/, '') }
+                );
+                if (parsed && (parsed.videoId || parsed.browseId)) results.push(parsed);
+              }
+            }
+          }
+        }
+      }
+      return sendJson(res, 200, { query: q, filter, topResult: results[0] || null, results });
+    }
+
+    // 5. /api/browse/:browseId
+    if (pathname.startsWith('/api/browse/')) {
+      const browseId = decodeURIComponent(pathname.replace('/api/browse/', ''));
+      const ytRes = await fetch(
+        'https://music.youtube.com/youtubei/v1/browse?prettyPrint=false',
+        {
+          method: 'POST',
+          headers: INNERTUBE_HEADERS,
+          body: JSON.stringify({ context: INNERTUBE_CONTEXT, browseId }),
+        }
+      );
+      const data = await ytRes.json();
+
+      if (data.contents?.twoColumnBrowseResultsRenderer) {
+        const twoCol = data.contents.twoColumnBrowseResultsRenderer;
+        const header =
+          twoCol.tabs?.[0]?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]
+            ?.musicResponsiveHeaderRenderer;
+        const title = runsText(header?.title) || 'Collection';
+        const subtitle = runsText(header?.subtitle) || '';
+        const artist = runsText(header?.straplineTextOne) || 'YouTube Music';
+        const description =
+          runsText(header?.description?.musicDescriptionShelfRenderer?.description) || '';
+        const secondSubtitle = runsText(header?.secondSubtitle) || '';
+        const thumbs =
+          header?.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
+        const thumbnail = upgradeThumbnail(thumbs[thumbs.length - 1]?.url);
+
+        const secContents = twoCol.secondaryContents?.sectionListRenderer?.contents || [];
+        const tracks = [];
+        for (const sc of secContents) {
+          const shelf = sc.musicPlaylistShelfRenderer || sc.musicShelfRenderer;
+          if (!shelf) continue;
+          for (const c of shelf.contents || []) {
+            if (c.musicResponsiveListItemRenderer) {
+              const parsed = parseResponsiveListItem(c.musicResponsiveListItemRenderer, {
+                artist,
+                album: title,
+                thumbnail,
+                type: 'song',
+              });
+              if (parsed && parsed.videoId) tracks.push(parsed);
+            }
+          }
+        }
+        return sendJson(res, 200, {
+          browseId,
+          kind: browseId.startsWith('MPREb_') ? 'album' : 'playlist',
+          title,
+          artist,
+          subtitle,
+          secondSubtitle,
+          description,
+          thumbnail,
+          tracks,
+          shelves: [],
+        });
+      }
+
+      const header =
+        data.header?.musicImmersiveHeaderRenderer ||
+        data.header?.musicVisualHeaderRenderer;
+      const title = runsText(header?.title) || 'Artist';
+      const description = runsText(header?.description) || '';
+      const subscribers =
+        runsText(
+          header?.subscriptionButton?.subscribeButtonRenderer?.subscriberCountText
+        ) || '';
+      const thumbs =
+        header?.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
+      const thumbnail = upgradeThumbnail(thumbs[thumbs.length - 1]?.url);
+      const rawShelves =
+        data.contents?.singleColumnBrowseResultsRenderer?.tabs?.[0]?.tabRenderer
+          ?.content?.sectionListRenderer?.contents || [];
+      const tracks = [];
+      const shelves = [];
+
+      for (const s of rawShelves) {
+        if (s.musicShelfRenderer) {
+          for (const c of s.musicShelfRenderer.contents || []) {
+            if (c.musicResponsiveListItemRenderer) {
+              const parsed = parseResponsiveListItem(
+                c.musicResponsiveListItemRenderer,
+                { artist: title, thumbnail }
+              );
+              if (parsed && parsed.videoId) tracks.push(parsed);
+            }
+          }
+        } else if (s.musicCarouselShelfRenderer) {
+          const carousel = s.musicCarouselShelfRenderer;
+          const shelfTitle =
+            runsText(carousel.header?.musicCarouselShelfBasicHeaderRenderer?.title) ||
+            'Featured';
+          const items = [];
+          for (const c of carousel.contents || []) {
+            if (c.musicTwoRowItemRenderer) {
+              const parsed = parseTwoRowItem(c.musicTwoRowItemRenderer);
+              if (parsed) items.push(parsed);
+            }
+          }
+          if (items.length > 0) shelves.push({ id: shelfTitle, title: shelfTitle, items });
+        }
+      }
+
+      return sendJson(res, 200, {
+        browseId,
+        kind: 'artist',
+        title,
+        artist: title,
+        subtitle: subscribers ? `${subscribers} subscribers` : 'Artist',
+        description,
+        thumbnail,
+        tracks,
+        shelves,
+      });
+    }
+
+    // 6. /api/track-context/:videoId
+    if (pathname.startsWith('/api/track-context/')) {
+      const videoId = decodeURIComponent(pathname.replace('/api/track-context/', ''));
+      const queryTitle = String(parsedUrl.searchParams.get('title') || '');
+      const queryArtist = String(parsedUrl.searchParams.get('artist') || '');
+
+      const [nextResult, primarySB, primaryRYD] = await Promise.all([
+        fetch('https://music.youtube.com/youtubei/v1/next?prettyPrint=false', {
+          method: 'POST',
+          headers: INNERTUBE_HEADERS,
+          body: JSON.stringify({
+            context: INNERTUBE_CONTEXT,
+            videoId,
+            playlistId: `RDAMVM${videoId}`,
+            isAudioOnly: true,
+          }),
+        })
+          .then((r) => r.json())
+          .catch(() => null),
+        fetchSponsorBlock(videoId),
+        fetchRYD(videoId),
+      ]);
+
+      const tabs =
+        nextResult?.contents?.singleColumnMusicWatchNextResultsRenderer
+          ?.tabbedRenderer?.watchNextTabbedResultsRenderer?.tabs || [];
+      const queueItemsRaw =
+        tabs[0]?.tabRenderer?.content?.musicQueueRenderer?.content
+          ?.playlistPanelRenderer?.contents || [];
+      const lyricsBrowseId =
+        tabs[1]?.tabRenderer?.endpoint?.browseEndpoint?.browseId || null;
+
+      const upNextQueue = [];
+      for (const q of queueItemsRaw) {
+        const pv = q.playlistPanelVideoRenderer;
+        if (!pv || !pv.videoId) continue;
+        const tTitle = runsText(pv.title);
+        const byline = runsText(pv.longBylineText) || runsText(pv.shortBylineText);
+        const bylineParts = byline.split('•').map((s) => s.trim());
+        const tArtist = bylineParts[0] || 'YouTube Music';
+        const tAlbum = bylineParts[1] || '';
+        const durText = runsText(pv.lengthText) || '3:30';
+        const thumbs = pv.thumbnail?.thumbnails || [];
+        const thumbUrl = upgradeThumbnail(thumbs[thumbs.length - 1]?.url, pv.videoId);
+        upNextQueue.push({
+          id: pv.videoId,
+          videoId: pv.videoId,
+          type: 'song',
+          title: tTitle,
+          artist: tArtist,
+          album: tAlbum,
+          duration: durText,
+          durationSeconds: parseDurationSeconds(durText) || 210,
+          thumbnail: thumbUrl,
+        });
+      }
+
+      const effectiveTitle = queryTitle || upNextQueue[0]?.title || 'Unknown Track';
+      const effectiveArtist = queryArtist || upNextQueue[0]?.artist || 'Unknown Artist';
+
+      let sponsorBlockSegments = primarySB;
+      let sponsorBlockVideoId = videoId;
+      let rydStats = primaryRYD;
+      let musicVideoId = videoId;
+
+      if (sponsorBlockSegments.length === 0 && effectiveTitle) {
+        const altVid = await findCounterpartMusicVideoId(effectiveTitle, effectiveArtist);
+        if (altVid && altVid !== videoId) {
+          musicVideoId = altVid;
+          const [altSB, altRYD] = await Promise.all([
+            fetchSponsorBlock(altVid),
+            fetchRYD(altVid),
+          ]);
+          if (altSB.length > 0) {
+            sponsorBlockSegments = altSB;
+            sponsorBlockVideoId = altVid;
+          }
+          if (altRYD && (!rydStats || (altRYD.viewCount || 0) > (rydStats.viewCount || 0))) {
+            rydStats = altRYD;
+          }
+        }
+      }
+
+      const [lyricsData, audioStream] = await Promise.all([
+        fetchLyrics(effectiveTitle, effectiveArtist, lyricsBrowseId),
+        resolveDirectAudioStream(effectiveTitle, effectiveArtist),
+      ]);
+
+      return sendJson(res, 200, {
+        videoId,
+        musicVideoId,
+        title: effectiveTitle,
+        artist: effectiveArtist,
+        innertubeClient: 'WEB_REMIX (1.20240724.01.00)',
+        sponsorBlock: {
+          videoId: sponsorBlockVideoId,
+          segmentCount: sponsorBlockSegments.length,
+          segments: sponsorBlockSegments,
+        },
+        returnYouTubeDislike: rydStats || {
+          id: videoId,
+          likes: 0,
+          dislikes: 0,
+          viewCount: 0,
+          rating: 5.0,
+          likePercentage: 100,
+        },
+        lyrics: lyricsData,
+        audioStream,
+        upNext: upNextQueue.slice(0, 30),
+      });
+    }
+
+    // 7. /api/audio-proxy
+    if (pathname === '/api/audio-proxy') {
+      const targetUrl = String(parsedUrl.searchParams.get('url') || '');
+      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+        res.writeHead(400);
+        return res.end('Invalid stream URL');
+      }
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+      };
+      if (req.headers.range) headers.Range = req.headers.range;
+      const upstream = await fetch(targetUrl, { headers });
+      const resHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Accept-Ranges': 'bytes',
+      };
+      for (const h of ['content-type', 'content-length', 'content-range', 'cache-control']) {
+        const val = upstream.headers.get(h);
+        if (val) resHeaders[h] = val;
+      }
+      res.writeHead(upstream.status, resHeaders);
+      if (!upstream.body) return res.end();
+      return Readable.fromWeb(upstream.body).pipe(res);
+    }
+
+    // 8. /api/image-proxy
+    if (pathname === '/api/image-proxy') {
+      const targetUrl = String(parsedUrl.searchParams.get('url') || '');
+      if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+        res.writeHead(400);
+        return res.end('Invalid image URL');
+      }
+      const upstream = await fetch(targetUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        },
+      });
+      if (!upstream.ok) {
+        res.writeHead(upstream.status);
+        return res.end();
+      }
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      res.writeHead(200, {
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=86400',
+        'Content-Type': upstream.headers.get('content-type') || 'image/jpeg',
+      });
+      return res.end(buf);
+    }
+
+    // 9. Serve Static Files from web_bundle/ or public/
+    const safePath = path.normalize(pathname).replace(/^(\.\.(\/|\\|$))+/, '');
+    let filePath = path.join(WEB_BUNDLE_DIR, safePath === '/' ? 'index.html' : safePath);
+    if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+      const pubCandidate = path.join(PUBLIC_DIR, safePath);
+      if (fs.existsSync(pubCandidate) && !fs.statSync(pubCandidate).isDirectory()) {
+        filePath = pubCandidate;
+      } else {
+        filePath = path.join(WEB_BUNDLE_DIR, 'index.html');
       }
     }
 
-    // 3. Fetch LRCLIB Synced Lyrics and Direct Audio Stream in parallel
-    const [lyricsData, audioStream] = await Promise.all([
-      fetchLyrics(effectiveTitle, effectiveArtist, lyricsBrowseId),
-      resolveDirectAudioStream(effectiveTitle, effectiveArtist),
-    ]);
-
-    res.json({
-      videoId,
-      musicVideoId,
-      title: effectiveTitle,
-      artist: effectiveArtist,
-      innertubeClient: 'WEB_REMIX (1.20240724.01.00)',
-      sponsorBlock: {
-        videoId: sponsorBlockVideoId,
-        segmentCount: sponsorBlockSegments.length,
-        segments: sponsorBlockSegments,
-      },
-      returnYouTubeDislike: rydStats || {
-        id: videoId,
-        likes: 0,
-        dislikes: 0,
-        viewCount: 0,
-        rating: 5.0,
-        likePercentage: 100,
-      },
-      lyrics: lyricsData,
-      audioStream,
-      upNext: upNextQueue.slice(0, 30),
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    const content = fs.readFileSync(filePath);
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Access-Control-Allow-Origin': '*',
     });
+    return res.end(content);
   } catch (err) {
-    console.error('Error in /api/track-context:', err);
-    res.status(500).json({ error: 'Failed to load track context' });
-  }
-});
-
-// 7. Audio Stream Proxy with Range Request Support (for Web Audio API EQ/Visualizer & CORS-free playback)
-app.get('/api/audio-proxy', async (req, res) => {
-  const targetUrl = String(req.query.url || '');
-  if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
-    return res.status(400).send('Invalid stream URL');
-  }
-
-  try {
-    const headers = {
-      'User-Agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-    };
-    if (req.headers.range) {
-      headers.Range = req.headers.range;
+    console.error('Server error:', err);
+    if (!res.headersSent) {
+      sendJson(res, 500, { error: 'Internal server error' });
     }
-
-    const upstream = await fetch(targetUrl, { headers });
-    res.status(upstream.status);
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Accept-Ranges', 'bytes');
-
-    const passHeaders = [
-      'content-type',
-      'content-length',
-      'content-range',
-      'cache-control',
-    ];
-    for (const h of passHeaders) {
-      const val = upstream.headers.get(h);
-      if (val) res.setHeader(h, val);
-    }
-
-    if (!upstream.body) return res.end();
-    Readable.fromWeb(upstream.body).pipe(res);
-  } catch (err) {
-    console.error('Audio proxy error:', err.message);
-    if (!res.headersSent) res.status(502).send('Audio stream proxy error');
   }
 });
 
-// 8. Image Proxy for CORS-free Material You Dynamic Palette Extraction on <canvas>
-app.get('/api/image-proxy', async (req, res) => {
-  const targetUrl = String(req.query.url || '');
-  if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
-    return res.status(400).send('Invalid image URL');
-  }
-
-  try {
-    const upstream = await fetch(targetUrl, {
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-      },
-    });
-    if (!upstream.ok) return res.status(upstream.status).end();
-
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    res.setHeader(
-      'Content-Type',
-      upstream.headers.get('content-type') || 'image/jpeg'
-    );
-
-    const arrayBuffer = await upstream.arrayBuffer();
-    res.send(Buffer.from(arrayBuffer));
-  } catch (err) {
-    res.status(502).send('Image proxy failed');
-  }
-});
-
-// Serve built frontend static assets on port 3001 so port 3001 serves both UI and /api/*
-app.use(express.static(DIST_DIR));
-app.use(express.static(PUBLIC_DIR));
-
-app.get('*', (req, res) => {
-  res.sendFile(path.join(DIST_DIR, 'index.html'));
-});
-
-app.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`AuraMusic InnerTube Server & Web UI listening on http://0.0.0.0:${PORT}`);
 });
