@@ -1,0 +1,11 @@
+{
+  "name": "AuraMusic — SimpMusic InnerTube Client",
+  "short_name": "AuraMusic",
+  "description": "Free cross-platform YouTube Music client with InnerTube WEB_REMIX, SponsorBlock, ReturnYouTubeDislike & LRCLIB synced lyrics",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#141218",
+  "theme_color": "#d0bcff",
+  "orientation": "portrait-primary",
+  "categories": ["music", "entertainment"]
+}
