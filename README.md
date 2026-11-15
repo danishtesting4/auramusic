@@ -36,12 +36,20 @@ npm run dev
 
 ---
 
-## Pushing to Your GitHub Repository
+## Pushing to Your GitHub Repository & Hosting on GitHub Pages
 
-This workspace is already initialized as a Git repository with GitHub Actions CI configured in `.github/workflows/ci-release.yml`. To push to your own GitHub repo:
+This project includes a dual-mode client (`src/utils/apiClient.ts`) that uses the full Node/InnerTube backend (`/api/*`) when self-hosted and **automatically switches to Direct Browser Serverless Mode** when hosted on **GitHub Pages** (`*.github.io`), calling SponsorBlock (`sponsor.ajay.app`), ReturnYouTubeDislike (`returnyoutubedislikeapi.com`), LRCLIB (`lrclib.net`), and Apple/iTunes AAC streams directly from the browser via CORS.
 
+### 1. Push to GitHub
 ```bash
 git remote add origin https://github.com/<your-username>/<your-repo>.git
 git branch -M main
 git push -u origin main
 ```
+
+### 2. Enable GitHub Pages (1-Click Auto-Deploy)
+1. Open your repository on GitHub and go to **Settings → Pages**.
+2. Under **Build and deployment → Source**, select **GitHub Actions**.
+3. The included workflow (`.github/workflows/deploy-pages.yml`) will automatically build `dist/` and publish your live app at:
+   `https://<your-username>.github.io/<your-repo>/`
+

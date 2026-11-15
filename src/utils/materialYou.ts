@@ -134,52 +134,59 @@ export function applyMaterialYouSeedHue(hue: number, satBoost = 78): void {
   });
 }
 
-// Extract dominant vibrant hue from album cover URL using offscreen canvas
+// Extract dominant vibrant hue from album cover URL using offscreen canvas (supports both Node proxy and GitHub Pages direct CORS)
 export async function extractSeedHueFromImage(imageUrl: string): Promise<number | null> {
   if (!imageUrl) return null;
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    const proxied = `/api/image-proxy?url=${encodeURIComponent(imageUrl)}`;
+  const isGithubPages =
+    typeof window !== 'undefined' && window.location.hostname.endsWith('github.io');
 
-    img.onload = () => {
-      try {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return resolve(null);
-        canvas.width = 48;
-        canvas.height = 48;
-        ctx.drawImage(img, 0, 0, 48, 48);
-        const data = ctx.getImageData(0, 0, 48, 48).data;
+  const tryExtract = (srcUrl: string): Promise<number | null> =>
+    new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return resolve(null);
+          canvas.width = 48;
+          canvas.height = 48;
+          ctx.drawImage(img, 0, 0, 48, 48);
+          const data = ctx.getImageData(0, 0, 48, 48).data;
 
-        // Bucket hues weighted by saturation and mid-luminance (Material You vibrancy scoring)
-        const hueBuckets = new Array(36).fill(0);
-        let bestHue = 265;
-        let maxWeight = 0;
+          const hueBuckets = new Array(36).fill(0);
+          let bestHue = 265;
+          let maxWeight = 0;
 
-        for (let i = 0; i < data.length; i += 16) {
-          const r = data[i];
-          const g = data[i + 1];
-          const b = data[i + 2];
-          const [h, s, l] = rgbToHsl(r, g, b);
-          if (s < 18 || l < 12 || l > 90) continue;
-          const weight = (s / 100) * (1 - Math.abs(l - 50) / 50);
-          const bucket = Math.floor(h / 10) % 36;
-          hueBuckets[bucket] += weight;
-          if (hueBuckets[bucket] > maxWeight) {
-            maxWeight = hueBuckets[bucket];
-            bestHue = bucket * 10 + 5;
+          for (let i = 0; i < data.length; i += 16) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            const [h, s, l] = rgbToHsl(r, g, b);
+            if (s < 18 || l < 12 || l > 90) continue;
+            const weight = (s / 100) * (1 - Math.abs(l - 50) / 50);
+            const bucket = Math.floor(h / 10) % 36;
+            hueBuckets[bucket] += weight;
+            if (hueBuckets[bucket] > maxWeight) {
+              maxWeight = hueBuckets[bucket];
+              bestHue = bucket * 10 + 5;
+            }
           }
+          resolve(bestHue);
+        } catch {
+          resolve(null);
         }
-        resolve(bestHue);
-      } catch {
-        resolve(null);
-      }
-    };
+      };
+      img.onerror = () => resolve(null);
+      img.src = srcUrl;
+    });
 
-    img.onerror = () => resolve(null);
-    img.src = proxied;
-  });
+  if (isGithubPages) {
+    return tryExtract(imageUrl);
+  }
+  const viaProxy = await tryExtract(`/api/image-proxy?url=${encodeURIComponent(imageUrl)}`);
+  if (viaProxy !== null) return viaProxy;
+  return tryExtract(imageUrl);
 }
 
 export const MATERIAL_PRESET_THEMES = [

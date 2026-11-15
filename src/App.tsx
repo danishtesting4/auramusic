@@ -53,6 +53,13 @@ import {
   formatCompactNumber,
   formatSeconds,
 } from './utils/materialYou';
+import {
+  apiBrowse,
+  apiGetHome,
+  apiGetSuggestions,
+  apiGetTrackContext,
+  apiSearch,
+} from './utils/apiClient';
 import { SeekbarWithSponsorBlock } from './components/SeekbarWithSponsorBlock';
 import { DrawerTab, RightDrawerPanel } from './components/RightDrawerPanel';
 import { BrowseDetailView } from './components/BrowseDetailView';
@@ -203,8 +210,7 @@ export function App() {
   useEffect(() => {
     let mounted = true;
     setIsLoadingHome(true);
-    fetch('/api/home')
-      .then((r) => r.json())
+    apiGetHome()
       .then((data) => {
         if (!mounted) return;
         const shelves: HomeShelf[] = data.shelves || [];
@@ -280,14 +286,11 @@ export function App() {
       }
 
       try {
-        const res = await fetch(
-          `/api/track-context/${encodeURIComponent(
-            track.videoId || ''
-          )}?title=${encodeURIComponent(
-            track.title
-          )}&artist=${encodeURIComponent(track.artist)}`
+        const ctxData: TrackContextData = await apiGetTrackContext(
+          track.videoId || '',
+          track.title,
+          track.artist
         );
-        const ctxData: TrackContextData = await res.json();
         setTrackContext(ctxData);
         setIsLoadingContext(false);
 
@@ -569,8 +572,7 @@ export function App() {
       return;
     }
     const timer = setTimeout(() => {
-      fetch(`/api/suggestions?q=${encodeURIComponent(q)}`)
-        .then((r) => r.json())
+      apiGetSuggestions(q)
         .then((d) => setSuggestions(d.queries || []))
         .catch(() => {});
     }, 220);
@@ -591,10 +593,7 @@ export function App() {
     setIsSearching(true);
 
     try {
-      const res = await fetch(
-        `/api/search?q=${encodeURIComponent(q)}&filter=${encodeURIComponent(f)}`
-      );
-      const data = await res.json();
+      const data = await apiSearch(q, f);
       setSearchResults(data.results || []);
       setSearchTopResult(data.topResult || null);
     } catch {
@@ -610,8 +609,7 @@ export function App() {
     setActiveNav('browse_detail');
     setIsLoadingBrowse(true);
     try {
-      const res = await fetch(`/api/browse/${encodeURIComponent(browseId)}`);
-      const data: BrowseDetail = await res.json();
+      const data: BrowseDetail = await apiBrowse(browseId);
       setBrowseDetail(data);
     } catch {
       setBrowseDetail(null);
