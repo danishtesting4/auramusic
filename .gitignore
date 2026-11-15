@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+.npm/
+.cache/
+.local/
+.DS_Store
+*.log
+.env
+.env.*
+.bash*
+.profile
